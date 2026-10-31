@@ -1,10 +1,13 @@
 /*
- * Display buffer VDI for HarmonyOS on Redmi Note 10 Pro (sweet, SM7150).
+ * Display buffer VDI for Redmi Note 10 Pro (sweet, SM7150) and Xiaomi Mi 6
+ * (sagit, MSM8998).
  *
- * Allocates graphics buffers as DRM "dumb" buffers on the msm DRM device
- * (/dev/dri/card0) and hands them out as dma-buf fds inside a BufferHandle.
- * The same fds are scanned out by the composer (PRIME import + KMS) and
- * rendered into by Mesa's software rasterizer (kms_swrast, PRIME import).
+ * Two allocation backends:
+ *  - DRM "dumb" buffers on /dev/dri/card0 (sweet): the fds are scanned out by
+ *    the composer (PRIME import + KMS) and rendered into by Mesa kms_swrast.
+ *  - msm ION system heap on /dev/ion (sagit, no DRM in the kernel): the fds
+ *    are imported by the mdp atomic commit path; software rendering maps the
+ *    same dma-buf.
  *
  * Interface: OpenHarmony 5.0.x IDisplayBufferVdi (vtable verified against the
  * HarmonyOS 5.0.5 vendor library).  License: Apache-2.0
@@ -40,8 +43,34 @@ constexpr int32_t DISPLAY_PARAM_ERR_ = -2;
 constexpr int32_t DISPLAY_NOMEM_ = -6;
 constexpr int32_t DISPLAY_NOT_SUPPORT_ = -5;
 
+/*
+ * ION uapi of this kernel (include/uapi/linux/ion.h, 4.4 msm).  Declared here
+ * because the OpenHarmony sysroot has no linux/ion.h.
+ */
+struct IonAllocationData {
+    size_t len;
+    size_t align;
+    unsigned int heapIdMask;
+    unsigned int flags;
+    int handle;
+};
+struct IonFdData {
+    int handle;
+    int fd;
+};
+struct IonHandleData {
+    int handle;
+};
+constexpr unsigned long ION_IOC_ALLOC_ = _IOWR('I', 0, IonAllocationData);
+constexpr unsigned long ION_IOC_FREE_ = _IOWR('I', 1, IonHandleData);
+constexpr unsigned long ION_IOC_SHARE_ = _IOWR('I', 4, IonFdData);
+constexpr unsigned int ION_FLAG_CACHED_ = 1;
+constexpr unsigned int ION_FLAG_CACHED_NEEDS_SYNC_ = 2;
+/* msm8998-ion.dtsi: system_heap is qcom,ion-heap@25 */
+constexpr unsigned int ION_HEAP_SYSTEM_SAGIT_ = 1u << 25;
+
 struct FormatInfo {
-    uint32_t bitsPerPixel;   /* for the first plane, used for the dumb allocation */
+    uint32_t bitsPerPixel;   /* for the first plane, used for the allocation */
     uint32_t heightNum;      /* total height = height * heightNum / heightDen */
     uint32_t heightDen;
 };
@@ -89,6 +118,35 @@ bool GetFormatInfo(uint32_t format, FormatInfo &fi)
     }
 }
 
+/* stride in bytes, 64-byte aligned (the mdp and the software renderer both
+ * assume at least that) */
+uint32_t AlignedPitch(uint32_t width, const FormatInfo &fi)
+{
+    uint32_t bytes = (width * fi.bitsPerPixel + 7) / 8;
+    return (bytes + 63) & ~63u;
+}
+
+BufferHandle *NewHandle(int fd, size_t size, int32_t stride, uint32_t width, uint32_t height, uint32_t format,
+    uint32_t usage)
+{
+    auto *bh = static_cast<BufferHandle *>(calloc(1, sizeof(BufferHandle)));
+    if (bh == nullptr) {
+        return nullptr;
+    }
+    bh->fd = fd;
+    bh->width = static_cast<int32_t>(width);
+    bh->height = static_cast<int32_t>(height);
+    bh->stride = stride;
+    bh->size = static_cast<int32_t>(size);
+    bh->format = static_cast<int32_t>(format);
+    bh->usage = usage;
+    bh->virAddr = nullptr;
+    bh->phyAddr = 0;
+    bh->reserveFds = 0;
+    bh->reserveInts = 0;
+    return bh;
+}
+
 int DrmFd()
 {
     static int fd = -1;
@@ -103,12 +161,64 @@ int DrmFd()
                     drmDropMaster(fd);
                 }
                 SLOGI("using %{public}s fd %{public}d", n, fd);
+                SKLOG("drm node %s fd %d", n, fd);
                 break;
             }
             SLOGE("open %{public}s failed: %{public}d", n, errno);
         }
+        if (fd < 0) {
+            SKLOG("no drm node, buffers will come from ion");
+        }
     });
     return fd;
+}
+
+int IonFd()
+{
+    static int fd = -1;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        fd = open("/dev/ion", O_RDWR | O_CLOEXEC);
+        if (fd >= 0) {
+            SLOGI("using /dev/ion fd %{public}d", fd);
+            SKLOG("ion fd %d", fd);
+        } else {
+            SLOGE("open /dev/ion failed: %{public}d", errno);
+            SKLOG("open /dev/ion failed errno %d", errno);
+        }
+    });
+    return fd;
+}
+
+/* allocate one dma-buf from an ion heap, return its fd */
+int IonAllocBuffer(size_t len, unsigned int heapMask, int flags)
+{
+    int ion = IonFd();
+    if (ion < 0) {
+        return -1;
+    }
+    IonAllocationData alloc = {};
+    alloc.len = len;
+    alloc.align = 4096;
+    alloc.heapIdMask = heapMask;
+    alloc.flags = static_cast<unsigned int>(flags);
+    alloc.handle = 0;
+    if (ioctl(ion, ION_IOC_ALLOC_, &alloc) != 0) {
+        SLOGE("ION_ALLOC len %{public}llu heap 0x%{public}x failed: %{public}d",
+            (unsigned long long)len, heapMask, errno);
+        SKLOG("ION_ALLOC len %zu heap 0x%x errno %d", len, heapMask, errno);
+        return -1;
+    }
+    IonFdData share = {alloc.handle, -1};
+    int ret = ioctl(ion, ION_IOC_SHARE_, &share);
+    IonHandleData release = {alloc.handle};
+    ioctl(ion, ION_IOC_FREE_, &release); /* the exported fd keeps the buffer alive */
+    if (ret != 0 || share.fd < 0) {
+        SLOGE("ION_SHARE failed: %{public}d", errno);
+        SKLOG("ION_SHARE failed errno %d", errno);
+        return -1;
+    }
+    return share.fd;
 }
 
 struct MetaKey {
@@ -124,52 +234,13 @@ public:
         FormatInfo fi;
         if (info.width == 0 || info.height == 0 || !GetFormatInfo(info.format, fi)) {
             SLOGE("unsupported alloc %{public}ux%{public}u fmt %{public}u", info.width, info.height, info.format);
+            SKLOG("unsupported alloc %ux%u fmt %u", info.width, info.height, info.format);
             return DISPLAY_NOT_SUPPORT_;
         }
-        int drm = DrmFd();
-        if (drm < 0) {
-            return DISPLAY_FAILURE_;
+        if (DrmFd() >= 0) {
+            return AllocDrm(info, fi, handle);
         }
-        /* width aligned to 64 px (Adreno a6xx needs >= 64-byte pitch alignment), height covers all planes */
-        uint32_t alignedW = (info.width + 63) & ~63u;
-        uint32_t allocH = (info.height * fi.heightNum + fi.heightDen - 1) / fi.heightDen;
-        struct drm_mode_create_dumb create = {};
-        create.width = alignedW;
-        create.height = allocH;
-        create.bpp = fi.bitsPerPixel;
-        if (drmIoctl(drm, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) {
-            SLOGE("CREATE_DUMB %{public}ux%{public}u bpp %{public}u failed: %{public}d", alignedW, allocH,
-                fi.bitsPerPixel, errno);
-            return DISPLAY_NOMEM_;
-        }
-        int dmaFd = -1;
-        int ret = drmPrimeHandleToFD(drm, create.handle, DRM_CLOEXEC | DRM_RDWR, &dmaFd);
-        struct drm_mode_destroy_dumb destroy = {create.handle};
-        drmIoctl(drm, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy); /* the dma-buf keeps the object alive */
-        if (ret != 0 || dmaFd < 0) {
-            SLOGE("PRIME export failed: %{public}d", errno);
-            return DISPLAY_FAILURE_;
-        }
-        auto *bh = static_cast<BufferHandle *>(calloc(1, sizeof(BufferHandle)));
-        if (bh == nullptr) {
-            close(dmaFd);
-            return DISPLAY_NOMEM_;
-        }
-        bh->fd = dmaFd;
-        bh->width = static_cast<int32_t>(info.width);
-        bh->height = static_cast<int32_t>(info.height);
-        bh->stride = static_cast<int32_t>(create.pitch);
-        bh->size = static_cast<int32_t>(create.size);
-        bh->format = static_cast<int32_t>(info.format);
-        bh->usage = info.usage;
-        bh->virAddr = nullptr;
-        bh->phyAddr = 0;
-        bh->reserveFds = 0;
-        bh->reserveInts = 0;
-        handle = bh;
-        SLOGI("alloc %{public}ux%{public}u fmt %{public}u -> fd %{public}d stride %{public}u size %{public}llu",
-            info.width, info.height, info.format, dmaFd, create.pitch, (unsigned long long)create.size);
-        return DISPLAY_SUCCESS_;
+        return AllocIon(info, fi, handle);
     }
 
     void FreeMem(const BufferHandle &handle) const override
@@ -199,6 +270,7 @@ public:
         void *p = mmap(nullptr, bh->size, PROT_READ | PROT_WRITE, MAP_SHARED, bh->fd, 0);
         if (p == MAP_FAILED) {
             SLOGE("mmap fd %{public}d size %{public}d failed: %{public}d", bh->fd, bh->size, errno);
+            SKLOG("mmap fd %d size %d errno %d", bh->fd, bh->size, errno);
             return nullptr;
         }
         bh->virAddr = p;
@@ -309,6 +381,72 @@ public:
     }
 
 private:
+    static int32_t AllocDrm(const AllocInfo &info, const FormatInfo &fi, BufferHandle *&handle)
+    {
+        int drm = DrmFd();
+        uint32_t alignedW = (info.width + 63) & ~63u;
+        uint32_t allocH = (info.height * fi.heightNum + fi.heightDen - 1) / fi.heightDen;
+        struct drm_mode_create_dumb create = {};
+        create.width = alignedW;
+        create.height = allocH;
+        create.bpp = fi.bitsPerPixel;
+        if (drmIoctl(drm, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) {
+            SLOGE("CREATE_DUMB %{public}ux%{public}u bpp %{public}u failed: %{public}d", alignedW, allocH,
+                fi.bitsPerPixel, errno);
+            return DISPLAY_NOMEM_;
+        }
+        int dmaFd = -1;
+        int ret = drmPrimeHandleToFD(drm, create.handle, DRM_CLOEXEC | DRM_RDWR, &dmaFd);
+        struct drm_mode_destroy_dumb destroy = {create.handle};
+        drmIoctl(drm, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy); /* the dma-buf keeps the object alive */
+        if (ret != 0 || dmaFd < 0) {
+            SLOGE("PRIME export failed: %{public}d", errno);
+            return DISPLAY_FAILURE_;
+        }
+        auto *bh = NewHandle(dmaFd, create.size, static_cast<int32_t>(create.pitch), info.width, info.height,
+            info.format, info.usage);
+        if (bh == nullptr) {
+            close(dmaFd);
+            return DISPLAY_NOMEM_;
+        }
+        handle = bh;
+        SLOGI("drm alloc %{public}ux%{public}u fmt %{public}u -> fd %{public}d stride %{public}u size %{public}llu",
+            info.width, info.height, info.format, dmaFd, create.pitch, (unsigned long long)create.size);
+        SKLOG("drm %ux%u fmt %u -> fd %d pitch %u size %llu", info.width, info.height, info.format, dmaFd,
+            create.pitch, (unsigned long long)create.size);
+        return DISPLAY_SUCCESS_;
+    }
+
+    static int32_t AllocIon(const AllocInfo &info, const FormatInfo &fi, BufferHandle *&handle)
+    {
+        uint32_t pitch = AlignedPitch(info.width, fi);
+        uint32_t allocH = (info.height * fi.heightNum + fi.heightDen - 1) / fi.heightDen;
+        /* the ion system heap rounds up to pages anyway; do it here so size
+         * and mmap cover exactly what the heap holds */
+        size_t len = (static_cast<size_t>(pitch) * allocH + 4095) & ~static_cast<size_t>(4095);
+        int flags = ION_FLAG_CACHED_ | ION_FLAG_CACHED_NEEDS_SYNC_;
+        int dmaFd = IonAllocBuffer(len, ION_HEAP_SYSTEM_SAGIT_, flags);
+        if (dmaFd < 0) {
+            /* some kernels export the plain ION_HEAP_SYSTEM_MASK instead */
+            dmaFd = IonAllocBuffer(len, 1u << 0, flags);
+        }
+        if (dmaFd < 0) {
+            return DISPLAY_NOMEM_;
+        }
+        auto *bh = NewHandle(dmaFd, len, static_cast<int32_t>(pitch), info.width, info.height, info.format,
+            info.usage);
+        if (bh == nullptr) {
+            close(dmaFd);
+            return DISPLAY_NOMEM_;
+        }
+        handle = bh;
+        SLOGI("ion alloc %{public}ux%{public}u fmt %{public}u -> fd %{public}d stride %{public}u size %{public}llu",
+            info.width, info.height, info.format, dmaFd, pitch, (unsigned long long)len);
+        SKLOG("ion %ux%u fmt %u -> fd %d pitch %u size %llu", info.width, info.height, info.format, dmaFd,
+            pitch, (unsigned long long)len);
+        return DISPLAY_SUCCESS_;
+    }
+
     static bool KeyOf(const BufferHandle &h, MetaKey &k)
     {
         struct stat st;
@@ -325,7 +463,8 @@ private:
 
 extern "C" IDisplayBufferVdi *CreateDisplayBufferVdi()
 {
-    SLOGI("sweet display buffer VDI (DRM dumb + PRIME)");
+    SLOGI("sweet display buffer VDI (DRM dumb + PRIME, ION fallback)");
+    SKLOG("buffer vdi loaded");
     return new SweetBufferVdi();
 }
 

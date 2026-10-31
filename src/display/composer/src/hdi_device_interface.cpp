@@ -17,6 +17,7 @@
 #include <vector>
 #include "display_log.h"
 #include "drm_device.h"
+#include "fbdev_device.h"
 
 namespace OHOS {
 namespace HDI {
@@ -24,19 +25,23 @@ namespace DISPLAY {
 std::vector<std::shared_ptr<HdiDeviceInterface>> HdiDeviceInterface::DiscoveryDevice()
 {
     DISPLAY_LOGD();
-    int ret;
     std::vector<std::shared_ptr<HdiDeviceInterface>> devices;
     std::shared_ptr<HdiDeviceInterface> drmDevice = DrmDevice::Create();
-    if (!drmDevice) {
-        DISPLAY_LOGE("can not create drm device");
-    }
-    ret = drmDevice->Init();
-    if (ret == DISPLAY_SUCCESS) {
+    if (drmDevice != nullptr && drmDevice->Init() == DISPLAY_SUCCESS) {
         DISPLAY_LOGD("drm device init success");
         devices.push_back(std::move(drmDevice));
-    } else {
-        DISPLAY_LOGE("drm device init failed");
+        return devices;
     }
+    /* no DRM in the kernel (sagit: msm fbdev only): the panel is driven through
+     * the msm framebuffer atomic commit ioctl instead */
+    DISPLAY_LOGE("drm device unavailable, falling back to fbdev");
+    std::shared_ptr<HdiDeviceInterface> fbdevDevice = FbdevDevice::Create();
+    if (fbdevDevice != nullptr && fbdevDevice->Init() == DISPLAY_SUCCESS) {
+        DISPLAY_LOGD("fbdev device init success");
+        devices.push_back(std::move(fbdevDevice));
+        return devices;
+    }
+    DISPLAY_LOGE("no display device (drm and fbdev both failed)");
     return devices;
 }
 }

@@ -29,16 +29,17 @@ namespace HDI {
 namespace DISPLAY {
 extern std::atomic<bool> g_hmosDisplayOff;
 extern std::atomic<int> g_hmosVirtualMode;
-}
-}
+/* soft-vsync period for panels without a hardware vblank event (fbdev) */
+std::atomic<uint32_t> g_hmosSynthPeriodNs{8333333};
 
-namespace HDI {
-namespace DISPLAY {
 DrmVsyncWorker::DrmVsyncWorker() {}
 
 int32_t DrmVsyncWorker::Init(int fd)
 {
-    DISPLAY_CHK_RETURN((fd < 0), DISPLAY_FAILURE, DISPLAY_LOGE("the fd is invalid"));
+    if (mRunning) {
+        return DISPLAY_SUCCESS;
+    }
+    /* fd < 0: no DRM device (fbdev panel) - run software vsync only */
     mDrmFd = fd;
     DISPLAY_LOGD("the drm fd is %{public}d", fd);
     /* must be set before the thread starts: the thread exits at once when
@@ -91,7 +92,7 @@ bool DrmVsyncWorker::WaitSignalAndCheckRuning()
  * vblank interrupt (mode set in progress, panel off, splash hand-over), and
  * then render_service and every ArkUI app wait forever for their next vsync
  * ("ArkUI request vsync, but no vsync was received within 3 seconds").
- * Returns 0 when no real vblank arrived in time.
+ * Returns 0 when no real vblank arrived in time (or when there is no DRM).
  */
 uint64_t DrmVsyncWorker::WaitNextVBlank(unsigned int &sq)
 {
@@ -100,10 +101,16 @@ uint64_t DrmVsyncWorker::WaitNextVBlank(unsigned int &sq)
     static int vfd = -2;
     static bool pending = false;
     if (vfd == -2) {
-        vfd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
-        DISPLAY_LOGI("vsync: own drm fd %{public}d", vfd);
+        vfd = -1;
+        if (mDrmFd >= 0) {
+            vfd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+            DISPLAY_LOGI("vsync: own drm fd %{public}d", vfd);
+        }
     }
     int fd = vfd >= 0 ? vfd : mDrmFd;
+    if (fd < 0) {
+        return 0;
+    }
     if (!pending) {
         drmVBlank vblank = {};
         vblank.request.type = drmVBlankSeqType(DRM_VBLANK_RELATIVE | DRM_VBLANK_EVENT);
@@ -164,13 +171,13 @@ void DrmVsyncWorker::WorkThread()
         static int synthCount = 0;
         if (time == 0) {
             /* no real vblank: with the panel off stay quiet, otherwise keep a
-             * steady 120 Hz software vsync on the grid of the last real one,
+             * steady software vsync on the grid of the last real one,
              * never a zero timestamp (render_service drops those) */
             if (g_hmosDisplayOff.load()) {
                 usleep(16000);
                 continue;
             }
-            const uint64_t PERIOD = g_hmosVirtualMode.load() == 1 ? 16666667 : 8333333;
+            const uint64_t PERIOD = g_hmosSynthPeriodNs.load();
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             uint64_t n = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
