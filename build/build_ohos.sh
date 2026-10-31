@@ -10,7 +10,9 @@ CXX="ohos-clang++ -std=c++17 -O2 -fPIC -Wno-everything"
 CC="ohos-clang -O2 -fPIC -Wno-everything"
 BCF="$O/third_party_bounds_checking_function/include"
 
-# ---- display: buffer allocator + DRM/KMS composer
+# ---- display: buffer allocator + composer (DRM/KMS, or fbdev MDP atomic commit
+# when the kernel has no DRM). Needs the 5.0.3 interface headers that
+# fetch_oh_sources.sh pins: Huawei's composer ABI is the OpenHarmony 5.0 line.
 HAL_INC="-I$S/display/common -I$S/display/hdi-gen -I$S/display/hdi-gen/display -I$S/display/hdi-gen/display/buffer \
  -I$S/display/hdi-gen/display/composer -I$S/display/hdi-gen/display/graphic/common \
  -I$O/drivers_interface/display/composer/hdifd_parcelable -I$O/drivers_interface/display/composer \
