@@ -767,6 +767,56 @@ static void hilog_stream_tick(void)
 	hilog_pid = pid;
 }
 
+
+/*
+ * 4.4 only creates /sys/fs/pstore as a mount point; the filesystem has to be
+ * mounted before any record becomes visible.  Copy them to the cache
+ * partition so a boot that never reaches userspace can still be inspected.
+ */
+static void collect_pstore(int idx)
+{
+	char dpath[128], spath[320], dfile[352];
+	struct dirent *e;
+	DIR *d;
+	int saved = 0;
+
+	mkdir("/sys/fs/pstore", 0755);
+	if (mount("pstore", "/sys/fs/pstore", "pstore", 0, NULL)) {
+		klog("pstore: mount failed: %s", strerror(errno));
+		return;
+	}
+	snprintf(dpath, sizeof(dpath), "/hmoslog/hmos/pstore-%d", idx);
+	mkdir(dpath, 0700);
+	d = opendir("/sys/fs/pstore");
+	while (d && (e = readdir(d))) {
+		char buf[8192];
+		ssize_t r;
+		int in, out;
+
+		if (e->d_name[0] == '.')
+			continue;
+		snprintf(spath, sizeof(spath), "/sys/fs/pstore/%s", e->d_name);
+		snprintf(dfile, sizeof(dfile), "%s/%s", dpath, e->d_name);
+		in = open(spath, O_RDONLY | O_CLOEXEC);
+		if (in < 0)
+			continue;
+		out = open(dfile, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+		if (out >= 0) {
+			while ((r = read(in, buf, sizeof(buf))) > 0)
+				if (write(out, buf, r) != r)
+					break;
+			fdatasync(out);
+			close(out);
+			saved++;
+		}
+		close(in);
+	}
+	if (d)
+		closedir(d);
+	umount2("/sys/fs/pstore", MNT_DETACH);
+	klog("pstore: %d record(s) saved to pstore-%d", saved, idx);
+}
+
 static void start_logger(void)
 {
 	char dev[64], path[128];
@@ -818,6 +868,7 @@ static void start_logger(void)
 		return;
 	}
 	klog("persistent log: cache:/hmos/kmsg-%d.log", idx);
+	collect_pstore(idx);
 	/* per-boot directory for the diagnostics snapshots */
 	char sdir[128];
 	snprintf(sdir, sizeof(sdir), "/hmoslog/hmos/boot-%d", idx);
