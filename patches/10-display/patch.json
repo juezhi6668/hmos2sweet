@@ -1,7 +1,7 @@
 {
-  "name": "Display: DRM/KMS composer + buffer allocator",
+  "name": "Display: composer + buffer allocator (DRM or fbdev)",
   "default": true,
-  "description": "Replaces Huawei's display HALs with a DRM/KMS composer (atomic commits, vblank, 60/120 Hz modes, DPMS + backlight) and a dma-buf allocator for the sweet panel. Without it there is no picture.",
+  "description": "Replaces Huawei's display HALs with either a DRM/KMS composer (atomic commits, real vblank, DPMS + backlight) or, when the kernel has no DRM, an msm fbdev composer (MSMFB_ATOMIC_COMMIT on one fullscreen client layer, software 60 Hz vsync, wled backlight). Buffers are allocated as DRM dumb+PRIME objects or from the msm ION system heap. Without it there is no picture.",
   "vendor_files": [
     {
       "src": "files/lib64/libdisplay_composer_vdi_impl.z.so",
@@ -14,21 +14,19 @@
       "mode": "0644"
     }
   ],
-  "ueventd": [
-    "# hmos2sweet: msm DRM nodes used by the display HALs and Mesa",
-    "/dev/dri/card0 0666 0 1003",
-    "/dev/dri/renderD128 0666 0 1003",
-    "/dev/dri/controlD64 0660 0 1003"
-  ],
+  "ueventd": [],
   "init": {
     "jobs": [
       {
         "name": "post-fs-data",
         "cmds": [
+          "chmod 0666 /dev/kmsg",
+          "chmod 0666 /dev/graphics/fb0",
+          "chmod 0666 /dev/ion",
+          "chown system system /sys/class/leds/wled/brightness",
+          "chmod 0666 /sys/class/leds/wled/brightness",
           "chown system system /sys/class/backlight/panel0-backlight/brightness",
-          "chmod 0666 /sys/class/backlight/panel0-backlight/brightness",
-          "chmod 0666 /dev/dri/card0",
-          "chmod 0666 /dev/dri/renderD128"
+          "chmod 0666 /sys/class/backlight/panel0-backlight/brightness"
         ]
       }
     ]
