@@ -36,6 +36,7 @@ Useful hilog tags:
 |---|---|
 | ADSP restarting every ~40 s (`sensor_process ... USER-PD DOG`) | needs patch 34 (hexagonrpcd); if it goes on, look for `hexagonrpcd` and `adsprpc` in kmsg |
 | `wlan: /dev/wlan ON -> -22`, no `wlan0` | look for `sweet: board id` / `BDF download` (icnss) in kmsg: the kernel must send bdwlan to the firmware |
+| `sweet: BDF segment N rejected, result 1 error 1` in kmsg | normal for the last (end=1) segment: the vendor cnss-daemon gets the same answer, and the CAL_REPORT that follows is what releases the firmware (kernel patch 0019). An `error 19` instead means the ind_register/MSA state is wrong, not the board data file |
 | Bluetooth does not turn on | `sweet-bt:` lines in kmsg: chip version, crbtfw/crnv files, HCI reset answer |
 | Spontaneous reboots | run `get_logs` right after: `pstore/` and the `kmsg` of the previous boot show the cause; look for `crashed`, `critical`, `subsys-restart`, `Kernel panic`. Patch 15 removes the reboots for crashing services, kernel patch 0013 those for a slow ADSP/modem |
 | "Power off" restarts the phone | with a cable plugged in this is off-mode charging: since this release the phone stays off and charges. Without a cable, look for `hmos: power off requested` in pstore |

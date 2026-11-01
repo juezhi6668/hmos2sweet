@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hmos2sweet <hmos2sweet@localhost>
+Date: Sun, 1 Nov 2026 15:50:00 +0800
+Subject: [PATCH] icnss: send the cal report after a rejected BDF completion
+
+The WCN3990 firmware answers the last BDF segment (the one with end=1) with
+result=1 error=1 even when it accepted the image. On sagit that was proven by
+capturing the vendor cnss-daemon's own accepted transactions over the legacy
+ipc-router: its four requests are byte-for-byte what we send, its completion
+is rejected the same way, and what releases the firmware is the CAL_REPORT it
+sends next -- READY_IND follows about 100 ms later. wlfw_send_bdf() treated any
+non-success as fatal and returned before icnss_sweet_download_bdf() reached the
+cal report, so the download was logged as failed and FW_READY never arrived.
+
+Only a rejection on a segment that is not the last one is a real failure.
+---
+diff --git a/drivers/soc/qcom/icnss_qmi.c b/drivers/soc/qcom/icnss_qmi.c
+--- a/drivers/soc/qcom/icnss_qmi.c
++++ b/drivers/soc/qcom/icnss_qmi.c
+@@ -488,10 +488,16 @@
+ 		ret = qmi_txn_wait(&txn, WLFW_TIMEOUT);
+ 		if (ret < 0)
+ 			goto out;
+ 		if (resp->resp.result != QMI_RESULT_SUCCESS_V01) {
+-			icnss_pr_err("sweet: BDF segment %u rejected, result %d error %d\n",
+-				     seg - 1, resp->resp.result, resp->resp.error);
+-			ret = -EINVAL;
+-			goto out;
++			/* The completion segment (end = 1) is answered with
++			 * result=1 error=1 by WCN3990 even when the image was
++			 * accepted -- the vendor cnss-daemon gets the same reply.
++			 * The firmware leaves its download state on the
++			 * calibration report, so this is only a failure before
++			 * the last segment. */
++			icnss_pr_err("sweet: BDF segment %u answered result %d error %d\n",
++				     seg - 1, resp->resp.result, resp->resp.error);
++			ret = req->end ? 0 : -EINVAL;
++			goto out;
+ 		}
+ 		left -= n;
+-- 
+2.43.0

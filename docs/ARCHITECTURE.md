@@ -51,6 +51,7 @@ reboot the phone), `firmware_class.path=/vendor/firmware`, `service_locator.enab
 | 0016 vibrator | the aw8624 also appears as `/sys/class/leds/vibrator` |
 | 0017 /sys/nfc | attributes Huawei's NFC stack reads (chip type, device node, config names) |
 | 0018 reboot log | logs who asks for power off/restart; `reboot("shutdown")` powers off |
+| 0019 icnss cal report | the BDF completion is answered with an error; the cal report after it is what makes the firmware send FW_READY |
 
 ## Display and GPU
 
