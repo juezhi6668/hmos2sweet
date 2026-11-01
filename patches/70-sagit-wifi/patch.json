@@ -1,0 +1,37 @@
+{
+  "name": "WiFi bring-up chain for sagit (msm8998, legacy ipc-router)",
+  "default": true,
+  "requires": [],
+  "description": "Installs the vendor service that starts the four host-side pieces the WCN3990 stack needs on this SoC before the modem can even be asked for WLAN: rfssrv2 (RFS/TFTP, serves wlanmdsp.mbn), wlq irsc (loads sec_config and releases the ipc-router IRSC port, without which every client send blocks forever), pdserve (host SERVREG_LOC 0x40:0101, the service-locator server that lets MPSS raise msm/modem/wlan_pd and publish WLFW 0x45) and rmt_storage (RMT STORAGE 0x0e:1, without which MPSS self-SSRs about 40 s after boot). It then holds /dev/subsys_modem open and parks, because closing that fd powers MPSS down and WLAN with it. The board data download itself is kernel side: src/kernel/sagit/patches/0001. See docs/devices/sagit/wifi.md.",
+  "markers": [
+    "etc/sagit/feature_wifi"
+  ],
+  "vendor_files": [
+    {
+      "src": "files/wlan-up.sh",
+      "dst": "bin/wlan-up.sh",
+      "mode": "0755",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "src": "files/wlan.cfg",
+      "dst": "etc/init/wlan.cfg",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    }
+  ],
+  "vendor_dirs": [
+    {
+      "dst": "persist",
+      "mode": "0755"
+    }
+  ],
+  "vendor_symlinks": [
+    {
+      "dst": "firmware/wlan/qca_cld/wlan_mac.bin",
+      "target": "/vendor/persist/wlan_mac.bin"
+    }
+  ]
+}
